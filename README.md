@@ -5,7 +5,7 @@ A script for the TamperMonkey Browser Extension that makes Youtube display the t
 
 ## Installation
 
-1. Install the Tampermonkey Extension for [Chrome](https://chromewebstore.google.com/detail/dhdgffkkebhmkfjojejmpbldmpobfkfo) or [Firefox](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/).
+1. Install the TamperMonkey Extension for [Chrome](https://chromewebstore.google.com/detail/dhdgffkkebhmkfjojejmpbldmpobfkfo) or [Firefox](https://addons.mozilla.org/en-US/firefox/addon/tampermonkey/)
 2. Download the script "[YoutubeThumbnailViewer.js](https://github.com/MordorsElite/YoutubeThumbnailViewerTamperMonkey/blob/main/YoutubeThumbnailViewer.js)" from this repository by clicking the little download icon with the description "Download raw file"
 3. Click on the extensions icon in the top right of your browser
 4. Click on Tampermonkey (a small panel with a number of options should now appear)
