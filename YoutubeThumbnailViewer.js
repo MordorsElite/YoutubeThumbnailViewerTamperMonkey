@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         YouTube Thumbnail Viewer
 // @namespace    https://tampermonkey.net/
-// @version      1.4
-// @description  Shows current video thumbnail + title above recommendations and reliably keeps title in sync during SPA navigation.
+// @version      1.6
+// @description  Shows current video thumbnail + title above recommendations with reliable fallback detection and no flickering.
 // @match        https://www.youtube.com/*
 // @grant        none
 // @run-at       document-end
@@ -10,6 +10,9 @@
 
 (function () {
     'use strict';
+
+    // Global: track if a correct thumbnail has been successfully loaded for the current video
+    let tmHasGoodThumbnail = false;
 
     // Utility: wait for element (promise)
     function waitFor(selector, timeout = 10000) {
@@ -29,7 +32,26 @@
         return new URLSearchParams(location.search).get('v');
     }
 
-    // Create or update the panel using provided title and thumbnail URL
+    // Build thumbnail URL from video id (try maxres)
+    function thumbUrlForId(vid) {
+        if (!vid) return '';
+        return `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`;
+    }
+
+    // Detect YouTube's blank placeholder thumbnail (usually ≤ 90 px tall)
+    function isBlankYouTubeThumbnail(img) {
+        return img.naturalHeight > 0 && img.naturalHeight <= 90;
+    }
+
+    // Read title safely
+    function readTitleText() {
+        const titleEl =
+            document.querySelector('h1.title') ||
+            document.querySelector('h1.ytd-watch-metadata');
+        return titleEl ? titleEl.innerText.trim() : '';
+    }
+
+    // Create or update the panel
     function renderPanel({ title, thumbnailUrl }) {
         const sidebar = document.querySelector('#secondary-inner');
         if (!sidebar) return;
@@ -44,136 +66,141 @@
             panel.style.display = 'flex';
             panel.style.flexDirection = 'column';
             panel.style.gap = '10px';
-            // Use a stable inner structure we can update later
+
             panel.innerHTML = `
                 <div class="tm-thumb-wrap" style="width:100%; aspect-ratio:16/9; overflow:hidden;">
                     <img class="tm-thumb-img" src="" style="width:100%; height:100%; object-fit:cover; display:block;">
                 </div>
                 <div class="tm-title" style="font-size:16px; font-weight:bold; color:white; text-align:center;"></div>
             `;
+
             sidebar.prepend(panel);
         }
 
         const img = panel.querySelector('.tm-thumb-img');
         const titleDiv = panel.querySelector('.tm-title');
 
-        // Update image only if changed to avoid flicker
-        if (thumbnailUrl && img.src !== thumbnailUrl) {
-            img.src = thumbnailUrl;
-        }
-
-        // Update title if different
+        // Update the title if changed
         if (typeof title === 'string' && titleDiv.innerText !== title) {
             titleDiv.innerText = title;
         }
+
+        // Update image only if changed AND we haven't already confirmed a good one
+        if (thumbnailUrl && img.src !== thumbnailUrl && !tmHasGoodThumbnail) {
+            img.onload = () => {
+                // Case 1: maxres works
+                if (!isBlankYouTubeThumbnail(img)) {
+                    tmHasGoodThumbnail = true;
+                    return;
+                }
+
+                // Case 2: fallback to hqdefault
+                const hq = thumbnailUrl.replace("maxresdefault", "hqdefault");
+                img.onload = () => {
+                    if (!isBlankYouTubeThumbnail(img)) {
+                        tmHasGoodThumbnail = true;
+                        return;
+                    }
+
+                    // Case 3: fallback to default
+                    const def = thumbnailUrl.replace("maxresdefault", "default");
+                    img.onload = () => {
+                        // If this loads, it's always OK
+                        tmHasGoodThumbnail = true;
+                    };
+                    img.src = def;
+                };
+                img.src = hq;
+            };
+
+            img.src = thumbnailUrl;
+        }
     }
 
-    // Remove panel
+    // Remove panel entirely
     function removePanel() {
         const old = document.querySelector('#tm-video-info-panel');
         if (old) old.remove();
     }
 
-    // Build thumbnail URL from video id (try maxres, fallback to hqdefault)
-    function thumbUrlForId(vid) {
-        if (!vid) return '';
-        // Prefer maxres then hq — browser will 404 if not available but it's okay (fallback handled by server)
-        return `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`;
-    }
-
-    // Try to read title element safely
-    function readTitleText() {
-        const titleEl = document.querySelector('h1.title') || document.querySelector('h1.ytd-watch-metadata');
-        return titleEl ? titleEl.innerText.trim() : '';
-    }
-
-    // Observers and binding
+    // Title observer reference
     let titleObserver = null;
-    let lastSeenVideoId = null;
 
-    // Bind observer to the title element so we react exactly when it changes
+    // Bind title change observer
     function bindTitleObserver() {
-        // Clean up old observer
         if (titleObserver) {
-            try { titleObserver.disconnect(); } catch (e) { /* ignore */ }
+            try { titleObserver.disconnect(); } catch (e) {}
             titleObserver = null;
         }
 
-        // Find the best title element available
-        const titleEl = document.querySelector('h1.title') || document.querySelector('h1.ytd-watch-metadata');
+        const titleEl =
+            document.querySelector('h1.title') ||
+            document.querySelector('h1.ytd-watch-metadata');
 
-        if (!titleEl) return; // nothing to observe right now
+        if (!titleEl) return;
 
-        // Observe text changes in the title element (and subtree in case children update)
-        titleObserver = new MutationObserver((mutations) => {
-            // When the title text changes, update panel immediately
+        titleObserver = new MutationObserver(() => {
             const newTitle = readTitleText();
             const vid = currentVideoId();
             renderPanel({ title: newTitle, thumbnailUrl: thumbUrlForId(vid) });
         });
 
-        titleObserver.observe(titleEl, { characterData: true, subtree: true, childList: true });
+        titleObserver.observe(titleEl, {
+            characterData: true,
+            subtree: true,
+            childList: true,
+        });
     }
 
-    // Called whenever we want to refresh panel state (URL change or initial)
+    // Refresh panel contents (called on initial load & SPA navigation)
     async function refreshPanel() {
+        // Reset thumbnail flag for the new video
+        tmHasGoodThumbnail = false;
+
         // Skip Shorts
         if (location.pathname.startsWith('/shorts')) {
             removePanel();
             return;
         }
 
-        // Wait for sidebar and title element to appear (reasonable timeout)
         const sidebar = await waitFor('#secondary-inner', 8000);
         if (!sidebar) return;
 
-        // Update thumbnail immediately based on URL
         const vid = currentVideoId();
-        lastSeenVideoId = vid;
         const thumb = thumbUrlForId(vid);
-
-        // If title exists, use it; otherwise set empty and rely on title observer to update when it appears
         const titleText = readTitleText();
 
-        renderPanel({ title: titleText || '', thumbnailUrl: thumb });
+        renderPanel({ title: titleText, thumbnailUrl: thumb });
 
-        // Bind observer to update the title once it's available or changes
         bindTitleObserver();
 
-        // Also watch for the title element being replaced (YouTube may replace the whole node)
-        // We'll observe a higher container for childList changes and re-bind when replacement occurs.
+        // Watch for title node replacement
         const primary = document.querySelector('#primary') || document.body;
         if (primary) {
-            // keep only one primary observer to avoid leaks
-            if (primary._tmPrimaryObserver) primary._tmPrimaryObserver.disconnect();
+            if (primary._tmPrimaryObserver) {
+                try { primary._tmPrimaryObserver.disconnect(); } catch (e) {}
+            }
 
-            const primaryObserver = new MutationObserver((mutations) => {
-                for (const m of mutations) {
-                    if (m.type === 'childList' && m.removedNodes.length + m.addedNodes.length > 0) {
-                        // Rebind title observer (it will handle no-op if nothing changed)
-                        bindTitleObserver();
-
-                        // Also ensure we refresh panel content in case the title element was replaced but text already changed
-                        const newTitle = readTitleText();
-                        const newVid = currentVideoId();
-                        renderPanel({ title: newTitle || '', thumbnailUrl: thumbUrlForId(newVid) });
-                        break;
-                    }
-                }
+            const primaryObserver = new MutationObserver(() => {
+                bindTitleObserver();
+                const newTitle = readTitleText();
+                const newVid = currentVideoId();
+                renderPanel({
+                    title: newTitle,
+                    thumbnailUrl: thumbUrlForId(newVid)
+                });
             });
 
             primaryObserver.observe(primary, { childList: true, subtree: true });
-            // store so we can disconnect later if needed
             primary._tmPrimaryObserver = primaryObserver;
         }
     }
 
-    // SPA navigation detection: watch for URL changes
+    // Monitor URL changes (SPA)
     let lastUrl = location.href;
     const spaObserver = new MutationObserver(() => {
         if (location.href !== lastUrl) {
             lastUrl = location.href;
-            // Debounce a bit because YouTube may do multiple mutations
             setTimeout(refreshPanel, 100);
         }
     });
@@ -182,9 +209,8 @@
     // Initial run
     refreshPanel();
 
-    // Clean up when navigating to Shorts or leaving page
+    // Clean up on Shorts navigation
     window.addEventListener('yt-navigate-start', () => {
-        // YouTube's own event; remove panel if navigating to shorts
         if (location.pathname.startsWith('/shorts')) removePanel();
     });
 
